@@ -1,0 +1,16 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Bases de datos vectoriales (Son pesadas y se generan localmente)
+db_vectorial/
+db_dinamica/
+
+# Archivos temporales de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Archivos de entorno y secretos (NUNCA subas contraseñas o IPs sensibles)
+.env
