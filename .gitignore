@@ -6,6 +6,7 @@ env/
 # Bases de datos vectoriales (Son pesadas y se generan localmente)
 db_vectorial/
 db_dinamica/
+db_api/
 
 # Archivos temporales de caché de Python
 __pycache__/
