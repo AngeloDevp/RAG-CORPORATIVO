@@ -7,6 +7,8 @@ from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+import requests
+from dotenv import load_dotenv  
 
 # Configuración visual
 st.set_page_config(page_title="Asistente RAG", page_icon="🏢")
@@ -112,25 +114,34 @@ if "retriever" in st.session_state:
             st.markdown(pregunta_usuario)
 
         with st.chat_message("assistant"):
-            with st.spinner("Analizando historial y buscando en el documento..."):
-                try:
-                    # 2. Recuperar documentos de la base de datos
-                    documentos = st.session_state.retriever.invoke(pregunta_usuario)
-                    contexto_str = format_docs(documentos)
+            try:
+                payload = {
+                    "pregunta": pregunta_usuario,
+                    "historial": st.session_state.mensajes[:-1] 
+                }
+                
+                # 1. Agregamos stream=True para decirle a requests que no espere al final
+                respuesta_api = requests.post(f"http://192.168.137.1:11434/chat", json=payload, timeout=60, stream=True)
+                
+                if respuesta_api.status_code == 200:
                     
-                    # 3. Formatear el historial (excluyendo la pregunta actual que ya se guardó)
-                    historial_str = format_historial(st.session_state.mensajes[:-1])
+                    # 2. Creamos un pequeño lector de datos que Streamlit pueda entender
+                    def leer_streaming(respuesta):
+                        for chunk in respuesta.iter_content(chunk_size=1024, decode_unicode=True):
+                            if chunk:
+                                yield chunk
+                                
+                    # 3. st.write_stream hace el efecto "máquina de escribir" automáticamente
+                    respuesta_texto = st.write_stream(leer_streaming(respuesta_api))
                     
-                    # 4. Inyectar todo al modelo
-                    respuesta = rag_chain.invoke({
-                        "context": contexto_str,
-                        "historial": historial_str,
-                        "question": pregunta_usuario
-                    })
+                    # 4. Guardamos la respuesta completa en la memoria
+                    st.session_state.mensajes.append({"rol": "assistant", "contenido": respuesta_texto})
+                else:
+                    st.error(f"Error del servidor: {respuesta_api.json().get('detail')}")
                     
-                    st.markdown(respuesta)
-                    st.session_state.mensajes.append({"rol": "assistant", "contenido": respuesta})
-                except Exception as e:
-                    st.error(f"Error de ejecución: {e}")
+            except requests.exceptions.Timeout:
+                st.error("⏳ La IA está tardando demasiado en responder. Verifica la ASUS.")
+            except requests.exceptions.ConnectionError:
+                st.error("🚨 Error de conexión con el Backend. ¿Se apagó la ASUS o se desconectó el cable?")
 else:
     st.info("👈 Por favor, sube un documento PDF en el panel lateral izquierdo para comenzar el análisis.")

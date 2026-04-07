@@ -2,6 +2,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel
 from typing import List
 import os
+from dotenv import load_dotenv
 import tempfile
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -9,6 +10,9 @@ from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from fastapi.responses import StreamingResponse
+
+load_dotenv()  # Carga variables de entorno desde .env
 
 # Inicializamos la API
 app = FastAPI(
@@ -19,7 +23,7 @@ app = FastAPI(
 
 # 1. CONFIGURACIÓN GLOBAL
 # ATENCIÓN: Verifica que esta sea la IP de tu ASUS por cable
-IP_IA = "http://192.168.137.1:11434" 
+IP_IA = os.getenv("OLLAMA_URL", "http:////127.0.0.1:11434")
 
 embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=IP_IA)
 llm = OllamaLLM(model="phi3", base_url=IP_IA)
@@ -70,7 +74,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     finally:
         os.remove(tmp_ruta) # Limpieza
 
-# 4. ENDPOINT: CHAT E IA
+# 4. ENDPOINT: CHAT E IA (AHORA CON STREAMING)
 @app.post("/chat")
 async def chat(request: ChatRequest):
     global vectorstore_retriever
@@ -99,21 +103,25 @@ async def chat(request: ChatRequest):
     contexto_str = "\n\n".join(doc.page_content for doc in documentos)
 
     # Formateamos el historial recibido
-    historial_str = ""
     if request.historial:
-        ultimos_mensajes = request.historial[-4:] # Límite de memoria
+        ultimos_mensajes = request.historial[-4:]
         lineas_historial = [f"{'Usuario' if m.rol == 'user' else 'Asistente'}: {m.contenido}" for m in ultimos_mensajes]
         historial_str = "\n".join(lineas_historial)
     else:
         historial_str = "No hay historial previo."
 
-    # Generamos la respuesta con la IA
-    try:
-        respuesta = rag_chain.invoke({
-            "context": contexto_str,
-            "historial": historial_str,
-            "question": request.pregunta
-        })
-        return {"respuesta": respuesta}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en el servidor de IA: {str(e)}")
+    # Función generadora que envía los pedazos de texto al instante
+    async def generar_respuesta():
+        try:
+            # En lugar de .invoke(), usamos .stream()
+            for chunk in rag_chain.stream({
+                "context": contexto_str,
+                "historial": historial_str,
+                "question": request.pregunta
+            }):
+                yield chunk # 'yield' es lo que hace la magia de enviar pedazo a pedazo
+        except Exception as e:
+            yield f"\n\n[Error de transmisión: {str(e)}]"
+
+    # Retornamos la respuesta como un flujo de texto continuo
+    return StreamingResponse(generar_respuesta(), media_type="text/plain")
