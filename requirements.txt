@@ -9,3 +9,6 @@ langchain-text-splitters
 langchain-chroma
 langchain-ollama
 pypdf
+streamlit
+requests
+python-dotenv
