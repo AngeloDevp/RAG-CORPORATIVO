@@ -1,127 +1,120 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from pydantic import BaseModel
-from typing import List
 import os
-from dotenv import load_dotenv
-import tempfile
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings, OllamaLLM
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import List, Dict, Any
+import shutil
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, UploadFile, File, HTTPException
+# Importa aquí las librerías de tu RAG (ChromaDB, LangChain, etc.)
 
-load_dotenv()  # Carga variables de entorno desde .env
+# 1. Variable global para mantener UNA SOLA conexión a la base de datos
+vector_db_client = None
 
-# Inicializamos la API
-app = FastAPI(
-    title="API RAG Corporativo", 
-    description="Backend para procesamiento de IA Local y Base de Datos Vectorial",
-    version="1.0.0"
-)
-
-# 1. CONFIGURACIÓN GLOBAL
-# ATENCIÓN: Verifica que esta sea la IP de tu ASUS por cable
-IP_IA = os.getenv("OLLAMA_URL", "http:////127.0.0.1:11434")
-
-embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=IP_IA)
-llm = OllamaLLM(model="phi3", base_url=IP_IA)
-
-# Variable global para mantener la base de datos cargada en memoria
-vectorstore_retriever = None
-
-# 2. MODELOS DE DATOS (Pydantic valida que los datos entren correctamente)
-class Mensaje(BaseModel):
-    rol: str
-    contenido: str
-
-class ChatRequest(BaseModel):
-    pregunta: str
-    historial: List[Mensaje] = []
-
-# 3. ENDPOINT: SUBIDA DE DOCUMENTOS
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    global vectorstore_retriever
+def cargar_base_de_datos(ruta_db: str):
+    """
+    Función que inicializa tu base de datos vectorial.
+    Sustituye el contenido de esta función con tu código real.
+    """
+    print(f"📂 Detectando/Cargando base de datos en: {ruta_db}")
+    # EJEMPLO CON CHROMADB:
+    # import chromadb
+    # client = chromadb.PersistentClient(path=ruta_db)
+    # collection = client.get_or_create_collection(name="rag_corporativo")
+    # return collection
     
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="El archivo debe ser un PDF")
-        
-    # Guardamos el archivo recibido temporalmente
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(await file.read())
-        tmp_ruta = tmp_file.name
+    # Mock (Simulación) para este ejemplo
+    class MockDB:
+        def procesar(self, archivo):
+            print(f"⚙️ Vectorizando e insertando {archivo} en la base de datos...")
+    return MockDB()
 
+
+# 2. Configuración del "Lifespan" (El patrón Singleton de FastAPI)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global vector_db_client
+    
+    # RUTA SEGURA: Recomiendo usar rutas absolutas. 
+    # Si 'Documents' tiene OneDrive, considera cambiar esto a 'C:/Proyectos_Locales/db_api'
+    db_path = os.path.abspath("./db_api")
+    os.makedirs(db_path, exist_ok=True)
+    
+    # --- STARTUP (Arranque del servidor) ---
     try:
-        loader = PyPDFLoader(tmp_ruta)
-        documentos = loader.load()
-        
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        textos_divididos = splitter.split_documents(documentos)
-
-        vectorstore = Chroma.from_documents(
-            documents=textos_divididos,
-            embedding=embeddings,
-            persist_directory="./db_api" # Nueva carpeta para la API
-        )
-        
-        vectorstore_retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-        return {"mensaje": "Documento procesado y vectorizado exitosamente", "archivo": file.filename}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error procesando documento: {str(e)}")
+        vector_db_client = cargar_base_de_datos(db_path)
+        print("✅ Base de datos cargada correctamente.")
+        yield
     finally:
-        os.remove(tmp_ruta) # Limpieza
+        # --- SHUTDOWN (Apagado del servidor) ---
+        print("🛑 Cerrando conexiones de manera segura...")
+        # Si tu cliente de DB tiene un método close(), llámalo aquí.
+        # Ejemplo: vector_db_client.close()
+        vector_db_client = None
 
-# 4. ENDPOINT: CHAT E IA (AHORA CON STREAMING)
+
+# 3. Inicialización de la App usando el lifespan
+app = FastAPI(lifespan=lifespan)
+
+
+# 4. Endpoint de subida de archivos blindado contra WinError 32
+@app.post("/upload")
+async def procesar_archivo(file: UploadFile = File(...)):
+    if not vector_db_client:
+        raise HTTPException(status_code=500, detail="La base de datos no está disponible.")
+
+    temp_file_path = f"./temp_{file.filename}"
+    
+    try:
+        # Guardar el archivo subido a disco de forma segura usando un bloque 'with'
+        with open(temp_file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        print(f"📄 Archivo temporal guardado en: {temp_file_path}")
+
+        # Aquí llamas a la inserción de tu RAG usando el cliente GLOBAL
+        vector_db_client.procesar(temp_file_path)
+        
+        return {"mensaje": f"Archivo '{file.filename}' vectorizado con éxito."}
+
+    except Exception as e:
+        # Si algo falla (ej. error 500), capturamos el error para que el bloque 'finally' se ejecute
+        print(f"❌ Error durante el procesamiento: {e}")
+        raise HTTPException(status_code=500, detail=f"Error procesando archivo: {str(e)}")
+
+    finally:
+        # --- ESTO ES LO QUE EVITA EL WINERROR 32 ---
+        
+        # 1. Liberamos el archivo subido de la memoria de FastAPI
+        await file.close()
+        
+        # 2. Eliminamos el archivo temporal que creamos para no dejar "basura" bloqueada
+        if os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print("🧹 Archivo temporal limpiado.")
+            except PermissionError:
+                # Si esto ocurre, una librería síncrona (como PyPDFLoader) no cerró el archivo internamente.
+                print(f"⚠️ Advertencia: No se pudo eliminar {temp_file_path}. Otra librería lo sigue usando.")
+
+# 1. Creamos un "Modelo" que represente el JSON que envía Streamlit
+class PeticionChat(BaseModel):
+    pregunta: str
+    historial: List[Dict[str, Any]] = [] # Permite recibir el historial de mensajes vacío o lleno
+
+# 5. Endpoint de Chat reutilizando la misma conexión
 @app.post("/chat")
-async def chat(request: ChatRequest):
-    global vectorstore_retriever
+async def chat_rag(peticion: PeticionChat):
+    if not vector_db_client:
+        raise HTTPException(status_code=500, detail="La base de datos no está disponible.")
     
-    if not vectorstore_retriever:
-        raise HTTPException(status_code=400, detail="Debes subir un documento primero en /upload")
-
-    template = """Eres un asistente corporativo experto. Usa exclusivamente los siguientes fragmentos de contexto y el historial de la conversación para responder a la pregunta de forma clara y concisa.
-    Si la respuesta a la pregunta no se encuentra en el contexto proporcionado, responde exactamente "No tengo informacion sobre esto en el documento proporcionado". No inventes datos.
-
-    Historial reciente de la conversación:
-    {historial}
-
-    Contexto recuperado del documento:
-    {context}
-
-    Pregunta actual del usuario: {question}
-
-    Respuesta:"""
+    # Extraemos la información del objeto que nos llegó
+    pregunta_usuario = peticion.pregunta
+    historial_chat = peticion.historial
     
-    prompt = PromptTemplate.from_template(template)
-    rag_chain = prompt | llm | StrOutputParser()
-
-    # Recuperamos fragmentos de la BD Vectorial
-    documentos = vectorstore_retriever.invoke(request.pregunta)
-    contexto_str = "\n\n".join(doc.page_content for doc in documentos)
-
-    # Formateamos el historial recibido
-    if request.historial:
-        ultimos_mensajes = request.historial[-4:]
-        lineas_historial = [f"{'Usuario' if m.rol == 'user' else 'Asistente'}: {m.contenido}" for m in ultimos_mensajes]
-        historial_str = "\n".join(lineas_historial)
-    else:
-        historial_str = "No hay historial previo."
-
-    # Función generadora que envía los pedazos de texto al instante
-    async def generar_respuesta():
-        try:
-            # En lugar de .invoke(), usamos .stream()
-            for chunk in rag_chain.stream({
-                "context": contexto_str,
-                "historial": historial_str,
-                "question": request.pregunta
-            }):
-                yield chunk # 'yield' es lo que hace la magia de enviar pedazo a pedazo
-        except Exception as e:
-            yield f"\n\n[Error de transmisión: {str(e)}]"
-
-    # Retornamos la respuesta como un flujo de texto continuo
-    return StreamingResponse(generar_respuesta(), media_type="text/plain")
+    # Imprimimos en la consola de la ASUS para confirmar que llegó bien
+    print(f"Recibido - Pregunta: {pregunta_usuario} | Historial: {len(historial_chat)} mensajes previos")
+    
+    # Aquí iría tu lógica de LangChain usando la variable "pregunta_usuario"
+    # respuesta = vector_db_client.query(query_texts=[pregunta_usuario])
+    
+    # Por ahora, retornamos un JSON normal
+    return {"respuesta": f"Respuesta simulada para: {pregunta_usuario}"}
